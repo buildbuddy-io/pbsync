@@ -57,12 +57,12 @@ func cacheKey(keys ...string) string {
 }
 
 func cachePath(key string) (string, error) {
-	sha := fmt.Sprintf("%x", sha256.Sum256([]byte(key)))
-	cacheRoot, err := os.UserCacheDir()
+	userDir, err := os.UserCacheDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(cacheRoot, sha), nil
+	sha := fmt.Sprintf("%x", sha256.Sum256([]byte(key)))
+	return filepath.Join(userDir, "pbsync", sha), nil
 }
 
 func cacheGet(key string) (value string, err error) {
