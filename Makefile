@@ -3,6 +3,7 @@ sgp: *.go go.mod go.sum
 
 go.sum: go.mod
 	go mod tidy
+	touch go.sum
 
 .PHONY: clean
 clean:
