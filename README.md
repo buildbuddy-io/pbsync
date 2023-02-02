@@ -17,3 +17,8 @@ bb install --user bduffany/pbsync
 
 - `go` 1.19 or higher
 - `make`
+
+## Thanks
+
+- Original implementation by Vadim Berezniker in https://github.com/vadimberezniker/sgp
+- Adapted from Zoey Greer's implementation in https://github.com/tempoz/sgp

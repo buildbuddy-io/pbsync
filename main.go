@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -9,7 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
+	"time"
 
 	"github.com/bazelbuild/buildtools/build"
 )
@@ -17,51 +19,100 @@ import (
 const (
 	goProtoLibrary = "go_proto_library"
 	tsProtoLibrary = "ts_proto_library"
+
+	bazelBinKey = "bazel-bin"
 )
 
 var (
 	githubRepoRe = regexp.MustCompile(`^github.com/(.+?)/(.+?)/`)
-
-	binDir struct {
-		Once  sync.Once
-		Value string
-		Err   error
-	}
 )
 
 func getBazelBinDir(workspaceRoot string) (string, error) {
-	compute := func() (string, error) {
-		cmd := exec.Command("bazel", "info", "--show_make_env")
-		cmd.Dir = workspaceRoot
-		b, err := cmd.CombinedOutput()
-		if err != nil {
-			return "", err
-		}
-		lines := strings.Split(string(b), "\n")
-		for _, line := range lines {
-			fields := strings.Fields(line)
-			if len(fields) != 2 || fields[0] != "bazel-bin:" {
-				continue
-			}
-			return fields[1], nil
-		}
-		return "", fmt.Errorf("missing 'bazel-bin' entry in `bazel info --show_make_env`")
+	// The `bazel info` command is unfortunately super slow (lame).
+	// So we cache it.
+	cached, err := cacheGet(cacheKey(bazelBinKey, workspaceRoot))
+	if err != nil {
+		return "", err
 	}
-	binDir.Once.Do(func() {
-		binDir.Value, binDir.Err = compute()
-	})
-	return binDir.Value, binDir.Err
+	if cached != "" {
+		return cached, nil
+	}
+	value, err := computeBazelBinDir(workspaceRoot)
+	if err != nil {
+		return "", err
+	}
+	if err := cacheSet(cacheKey(bazelBinKey, workspaceRoot), value); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+func cacheKey(keys ...string) string {
+	var b []byte
+	for _, k := range keys {
+		bk := sha256.Sum256([]byte(k))
+		b = append(b, bk[:]...)
+	}
+	return fmt.Sprintf("%x", b)
+}
+
+func cachePath(key string) (string, error) {
+	sha := fmt.Sprintf("%x", sha256.Sum256([]byte(key)))
+	cacheRoot, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(cacheRoot, sha), nil
+}
+
+func cacheGet(key string) (value string, err error) {
+	path, err := cachePath(key)
+	if err != nil {
+		return "", err
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+	}
+	return string(b), nil
+}
+
+func cacheSet(key, value string) error {
+	path, err := cachePath(key)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(value), 0644)
+}
+
+func computeBazelBinDir(workspaceRoot string) (string, error) {
+	cmd := exec.Command("bazel", "info", "--show_make_env")
+	cmd.Dir = workspaceRoot
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", err
+	}
+	lines := strings.Split(string(b), "\n")
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[0] != "bazel-bin:" {
+			continue
+		}
+		return fields[1], nil
+	}
+	return "", fmt.Errorf("missing 'bazel-bin' entry in `bazel info --show_make_env`")
 }
 
 type languageProtoRule struct {
 	kind, name, protoRuleName, importPath string
 }
 
-func (r *languageProtoRule) getSrcAndDest(workspaceRoot, protoPath string) (string, string, error) {
-	bazelBin, err := getBazelBinDir(workspaceRoot)
-	if err != nil {
-		return "", "", err
-	}
+func (r *languageProtoRule) getSrcAndDest(workspaceRoot, bazelBin, protoPath string) (string, string, error) {
 	protoRelpath := strings.TrimPrefix(protoPath, workspaceRoot)
 
 	switch r.kind {
@@ -184,8 +235,13 @@ func syncProto(workspaceRoot string, protoFile string, buildFile *parsedBuildFil
 		return nil
 	}
 
+	bazelBin, err := getBazelBinDir(workspaceRoot)
+	if err != nil {
+		return fmt.Errorf("failed to determine bazel bin dir: %s", err)
+	}
+
 	for _, rule := range rules {
-		src, dest, err := rule.getSrcAndDest(workspaceRoot, protoFile)
+		src, dest, err := rule.getSrcAndDest(workspaceRoot, bazelBin, protoFile)
 		if err != nil {
 			return err
 		}
@@ -233,34 +289,36 @@ func copyGeneratedProtos(workspaceRoot string) (*result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%q does not appear to be a Bazel workspace (no WORKSPACE file): %s", workspaceRoot, err)
 	}
-	var protoFiles []string
-	err = filepath.Walk(workspaceRoot, func(path string, info os.FileInfo, err error) error {
-		if !strings.HasSuffix(path, ".proto") {
-			return nil
+
+	// Get proto source paths (use the git index for speed)
+	var protos []string
+	lsFiles := exec.Command("git", "ls-files", "--exclude-standard")
+	lsFiles.Dir = workspaceRoot
+	lsFiles.Stderr = os.Stderr
+	buf := &bytes.Buffer{}
+	lsFiles.Stdout = buf
+	if err := lsFiles.Run(); err != nil {
+		return nil, fmt.Errorf("failed to list proto sources: git ls-files failed")
+	}
+	for _, path := range strings.Split(buf.String(), "\n") {
+		if strings.HasSuffix(path, ".proto") {
+			protos = append(protos, filepath.Join(workspaceRoot, path))
 		}
-		if err != nil {
-			return err
-		}
-		protoFiles = append(protoFiles, path)
-		return nil
-	})
-	if err != nil {
-		return nil, err
 	}
 
 	result := &result{}
 
 	buildFiles := make(map[string]*parsedBuildFile)
 
-	for _, protoFile := range protoFiles {
+	for _, proto := range protos {
 		// For now only support build files named "BUILD".
-		buildFilePath := filepath.Join(filepath.Dir(protoFile), "BUILD")
-		// Ignore protos that are not in bazel packages.
-		if _, err := os.Stat(buildFilePath); err != nil {
-			continue
-		}
+		buildFilePath := filepath.Join(filepath.Dir(proto), "BUILD")
 		buildFile := buildFiles[buildFilePath]
 		if buildFile == nil {
+			// Ignore protos that are not in bazel packages.
+			if _, err := os.Stat(buildFilePath); err != nil {
+				continue
+			}
 			buildFile, err = parseBuildFile(buildFilePath)
 			if err != nil {
 				return nil, fmt.Errorf("could not parse BUILD file %q: %v", buildFilePath, err)
@@ -268,7 +326,7 @@ func copyGeneratedProtos(workspaceRoot string) (*result, error) {
 			buildFiles[buildFilePath] = buildFile
 		}
 
-		if err := syncProto(workspaceRoot, protoFile, buildFile, result); err != nil {
+		if err := syncProto(workspaceRoot, proto, buildFile, result); err != nil {
 			return nil, err
 		}
 
@@ -282,6 +340,8 @@ func fatalf(msg string, args ...any) {
 }
 
 func main() {
+	start := time.Now()
+
 	flag.Parse()
 
 	dirs := flag.Args()
@@ -293,11 +353,16 @@ func main() {
 		dirs = append(dirs, cwd)
 	}
 
+	total := &result{}
+
 	for _, dir := range dirs {
 		result, err := copyGeneratedProtos(dir)
 		if err != nil {
 			fatalf("failed to sync protos for workspace %s: %s", dir, err)
 		}
-		fmt.Printf("pbsync: wrote %d protos (%d up to date)\n", result.created, result.upToDate)
+		total.created += result.created
+		total.upToDate += result.upToDate
 	}
+
+	fmt.Printf("pbsync: wrote %d protos in %s (%d up to date)\n", total.created, time.Since(start), total.upToDate)
 }
