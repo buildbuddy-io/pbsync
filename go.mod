@@ -1,4 +1,4 @@
-module github.com/bduffany/sgp
+module github.com/bduffany/pbsync
 
 go 1.19
 

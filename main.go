@@ -20,8 +20,6 @@ const (
 )
 
 var (
-	dirs = flag.String("dirs", "", "Bazel workspaces to process")
-
 	githubRepoRe = regexp.MustCompile(`^github.com/(.+?)/(.+?)/`)
 
 	binDir struct {
@@ -59,36 +57,31 @@ type languageProtoRule struct {
 	kind, name, protoRuleName, importPath string
 }
 
-func (r *languageProtoRule) getLinkAndTarget(workspaceRoot, protoFile string) (string, string, error) {
+func (r *languageProtoRule) getSrcAndDest(workspaceRoot, protoPath string) (string, string, error) {
 	bazelBin, err := getBazelBinDir(workspaceRoot)
 	if err != nil {
 		return "", "", err
 	}
-	protoFileRelPath := strings.TrimPrefix(protoFile, workspaceRoot)
+	protoRelpath := strings.TrimPrefix(protoPath, workspaceRoot)
 
 	switch r.kind {
+
 	case goProtoLibrary:
-		workspaceRelativePath := githubRepoRe.ReplaceAllLiteralString(r.importPath, "")
-		if workspaceRelativePath == r.importPath {
+		wsRelpath := githubRepoRe.ReplaceAllLiteralString(r.importPath, "")
+		if wsRelpath == r.importPath {
 			return "", "", fmt.Errorf("could not figure out workspace relative path for import %q", r.importPath)
 		}
+		protoBase := filepath.Base(protoPath)
+		genBase := strings.TrimSuffix(protoBase, ".proto") + ".pb.go"
+		src := filepath.Join(bazelBin, filepath.Dir(protoRelpath), r.name+"_", r.importPath, genBase)
+		dest := filepath.Join(workspaceRoot, wsRelpath, genBase)
+		return src, dest, nil
 
-		protoFileBasename := filepath.Base(protoFile)
-
-		linkSrcDir := filepath.Join(workspaceRoot, workspaceRelativePath)
-		if err := os.MkdirAll(linkSrcDir, 0700); err != nil {
-			return "", "", fmt.Errorf("could not make directory %q: %v", linkSrcDir, err)
-		}
-		linkSrcFile := strings.TrimSuffix(protoFileBasename, ".proto") + ".pb.go"
-		linkSrc := filepath.Join(linkSrcDir, linkSrcFile)
-
-		genProtoAbsPath := filepath.Join(bazelBin, filepath.Dir(protoFileRelPath), r.name+"_", r.importPath, linkSrcFile)
-
-		return linkSrc, genProtoAbsPath, nil
 	case tsProtoLibrary:
-		linkSrc := filepath.Join(workspaceRoot, filepath.Dir(protoFileRelPath), r.name+".d.ts")
-		genProtoAbsPath := filepath.Join(bazelBin, filepath.Dir(protoFileRelPath), r.name+".d.ts")
-		return linkSrc, genProtoAbsPath, nil
+		src := filepath.Join(bazelBin, filepath.Dir(protoRelpath), r.name+".d.ts")
+		dest := filepath.Join(workspaceRoot, filepath.Dir(protoRelpath), r.name+".d.ts")
+		return src, dest, nil
+
 	}
 	return "", "", fmt.Errorf("unknown proto rule kind %q", r.kind)
 }
@@ -151,7 +144,7 @@ func parseBuildFile(buildFilePath string) (*parsedBuildFile, error) {
 			return nil, fmt.Errorf("%s: go proto rule %q missing proto attribute", buildFilePath, r.Name())
 		}
 		if !strings.HasPrefix(protoRule, ":") {
-			fmt.Printf("%s: go proto rule %q has unsupported proto reference: %s\n", buildFilePath, r.Name(), protoRule)
+			// fmt.Printf("%s: go proto rule %q has unsupported proto reference: %s\n", buildFilePath, r.Name(), protoRule)
 			continue
 		}
 
@@ -184,47 +177,58 @@ type result struct {
 	upToDate int
 }
 
-func processProtoFile(workspaceRoot string, protoFile string, buildFile *parsedBuildFile, result *result) error {
-	langRules, ok := buildFile.getLangProtoRulesForProto(protoFile)
+func syncProto(workspaceRoot string, protoFile string, buildFile *parsedBuildFile, result *result) error {
+	rules, ok := buildFile.getLangProtoRulesForProto(protoFile)
 	if !ok {
-		fmt.Printf("could not figure out go proto rule for %q\n", protoFile)
+		fmt.Printf("could not figure out proto rule for %q\n", protoFile)
 		return nil
 	}
 
-	for _, langRule := range langRules {
-		link, linkTarget, err := langRule.getLinkAndTarget(workspaceRoot, protoFile)
+	for _, rule := range rules {
+		src, dest, err := rule.getSrcAndDest(workspaceRoot, protoFile)
 		if err != nil {
 			return err
 		}
 
-		s, err := os.Lstat(link)
-		if err == nil {
-			if s.Mode()&os.ModeSymlink == 0 {
-				return fmt.Errorf("%s already exists and is not a symlink", link)
+		// Read the generated source
+		sb, err := os.ReadFile(src)
+		if err != nil {
+			if os.IsNotExist(err) {
+				// Skip; the generated source is not available.
+				continue
 			}
-			existingTarget, err := os.Readlink(link)
-			if err != nil {
-				return fmt.Errorf("could not read symlink %q: %v", link, err)
-			}
-			// cautious for now but we should probably just overwrite the symlink
-			if existingTarget != linkTarget {
-				return fmt.Errorf("symlink %s already exists and points to a different location", link)
-			}
-			result.upToDate++
-		} else {
-			if err := os.Symlink(linkTarget, link); err != nil {
-				return fmt.Errorf("could not create symlink from %q to %q: %v", linkTarget, link, err)
-			}
-			fmt.Printf("Created symlink for %s\n", protoFile)
-			result.created++
+			return err
 		}
+		sourceContent := string(sb)
+		if sourceContent == "" {
+			return fmt.Errorf("file is unexpectedly empty: %s", protoFile)
+		}
+
+		// Read the existing target file
+		db, err := os.ReadFile(dest)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		destContent := string(db)
+
+		if sourceContent == destContent {
+			result.upToDate++
+			continue
+		}
+
+		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(dest, sb, 0644); err != nil {
+			return err
+		}
+
+		result.created++
 	}
 	return nil
 }
 
-func processWorkspace(workspaceRoot string) (*result, error) {
-	fmt.Printf("Processing directory %s\n", workspaceRoot)
-
+func copyGeneratedProtos(workspaceRoot string) (*result, error) {
 	_, err := os.Stat(filepath.Join(workspaceRoot, "WORKSPACE"))
 	if err != nil {
 		return nil, fmt.Errorf("%q does not appear to be a Bazel workspace (no WORKSPACE file): %s", workspaceRoot, err)
@@ -264,7 +268,7 @@ func processWorkspace(workspaceRoot string) (*result, error) {
 			buildFiles[buildFilePath] = buildFile
 		}
 
-		if err := processProtoFile(workspaceRoot, protoFile, buildFile, result); err != nil {
+		if err := syncProto(workspaceRoot, protoFile, buildFile, result); err != nil {
 			return nil, err
 		}
 
@@ -272,20 +276,28 @@ func processWorkspace(workspaceRoot string) (*result, error) {
 	return result, nil
 }
 
+func fatalf(msg string, args ...any) {
+	fmt.Printf("pbsync: "+msg+"\n", args...)
+	os.Exit(1)
+}
+
 func main() {
 	flag.Parse()
 
-	if *dirs == "" {
-		fmt.Printf("Please specify --dirs")
-		os.Exit(1)
+	dirs := flag.Args()
+	if len(dirs) == 0 {
+		cwd, err := os.Getwd()
+		if err != nil {
+			fatalf("failed to determine working dir: %s", err)
+		}
+		dirs = append(dirs, cwd)
 	}
 
-	for _, dir := range strings.Split(*dirs, ",") {
-		result, err := processWorkspace(dir)
+	for _, dir := range dirs {
+		result, err := copyGeneratedProtos(dir)
 		if err != nil {
-			fmt.Printf("Could not process workspace %s: %v\n", dir, err)
-			os.Exit(1)
+			fatalf("failed to sync protos for workspace %s: %s", dir, err)
 		}
-		fmt.Printf("SYMLINKS CREATED: %d, UP TO DATE: %d\n", result.created, result.upToDate)
+		fmt.Printf("pbsync: wrote %d protos (%d up to date)\n", result.created, result.upToDate)
 	}
 }

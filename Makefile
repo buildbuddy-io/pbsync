@@ -1,4 +1,4 @@
-sgp: *.go go.mod go.sum
+pbsync: *.go go.mod go.sum
 	go build
 
 go.sum: go.mod
@@ -7,4 +7,4 @@ go.sum: go.mod
 
 .PHONY: clean
 clean:
-	rm -rf sgp
+	git clean -fdx
