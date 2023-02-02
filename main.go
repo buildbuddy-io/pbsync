@@ -363,6 +363,11 @@ func main() {
 		total.created += result.created
 		total.upToDate += result.upToDate
 	}
+	if total.created > 0 {
+		fmt.Printf("🔄 ")
+	} else {
+		fmt.Printf("\x1b[90m")
+	}
 
-	fmt.Printf("pbsync: wrote %d protos in %s (%d up to date)\n", total.created, time.Since(start), total.upToDate)
+	fmt.Printf("pbsync: updated %d protos (%d up to date, elapsed time %s)\x1b[m\n", total.created, total.upToDate, time.Since(start))
 }
