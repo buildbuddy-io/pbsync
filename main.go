@@ -130,6 +130,7 @@ func parseBuildFile(buildFilePath string) (*parsedBuildFile, error) {
 			return nil, fmt.Errorf("%s: proto rule %q does not have have srcs", buildFilePath, r.Name())
 		}
 		for _, src := range srcs {
+			src = strings.TrimPrefix(src, ":")
 			if protoFileToRule[src] != "" {
 				return nil, fmt.Errorf("%s: src file %q appears in multiple proto rules", buildFilePath, src)
 			}
