@@ -3,7 +3,8 @@
 pbsync allows your IDE to properly resolve protobuf sources that are
 built with Bazel.
 
-Currently supports most Go protos, and TypeScript protos (using pbjs).
+Currently supports most Go protos and some TypeScript protos (`.d.ts`
+definitions built with protobufjs).
 
 ## Usage
 
