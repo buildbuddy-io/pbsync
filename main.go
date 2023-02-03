@@ -369,5 +369,5 @@ func main() {
 		fmt.Printf("\x1b[90m")
 	}
 
-	fmt.Printf("pbsync: updated %d protos (%d up to date, elapsed time %s)\x1b[m\n", total.created, total.upToDate, time.Since(start))
+	fmt.Printf("pbsync: updated: %d, up to date: %d, duration: %s\x1b[m\n", total.created, total.upToDate, time.Since(start))
 }
