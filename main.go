@@ -357,14 +357,14 @@ func newBuildFileParser() *buildFileParser {
 }
 
 func (p *buildFileParser) Parse(path string) (*parsedBuildFile, error) {
-	p.mu.RLock()
-	cached := p.cache[path]
-	p.mu.RUnlock()
-	if cached != nil {
-		return cached.Val, cached.Err
-	}
-
 	val, err, _ := p.group.Do(path, func() (val interface{}, err error) {
+		p.mu.RLock()
+		cached := p.cache[path]
+		p.mu.RUnlock()
+		if cached != nil {
+			return cached.Val, cached.Err
+		}
+
 		defer func() {
 			result := &Result[*parsedBuildFile]{}
 			if err != nil {
