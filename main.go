@@ -11,9 +11,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bazelbuild/buildtools/build"
+	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -158,7 +162,7 @@ func (b *parsedBuildFile) getLangProtoRulesForProto(protoFile string) ([]languag
 func parseBuildFile(buildFilePath string) (*parsedBuildFile, error) {
 	buildFileContents, err := ioutil.ReadFile(buildFilePath)
 	if err != nil {
-		return nil, fmt.Errorf("could not read BUILD file %q: %v", buildFilePath, err)
+		return nil, err
 	}
 	buildFile, err := build.ParseBuild(filepath.Base(buildFilePath), buildFileContents)
 	if err != nil {
@@ -224,8 +228,8 @@ func parseBuildFile(buildFilePath string) (*parsedBuildFile, error) {
 }
 
 type result struct {
-	created  int
-	upToDate int
+	created  int64
+	upToDate int64
 }
 
 func syncProto(workspaceRoot string, protoFile string, buildFile *parsedBuildFile, result *result) error {
@@ -268,7 +272,7 @@ func syncProto(workspaceRoot string, protoFile string, buildFile *parsedBuildFil
 		destContent := string(db)
 
 		if sourceContent == destContent {
-			result.upToDate++
+			atomic.AddInt64(&result.upToDate, 1)
 			continue
 		}
 
@@ -278,8 +282,7 @@ func syncProto(workspaceRoot string, protoFile string, buildFile *parsedBuildFil
 		if err := os.WriteFile(dest, sb, 0644); err != nil {
 			return err
 		}
-
-		result.created++
+		atomic.AddInt64(&result.created, 1)
 	}
 	return nil
 }
@@ -292,7 +295,7 @@ func copyGeneratedProtos(workspaceRoot string) (*result, error) {
 
 	// Get proto source paths (use the git index for speed)
 	var protos []string
-	lsFiles := exec.Command("git", "ls-files", "--exclude-standard")
+	lsFiles := exec.Command("git", "ls-files", "--exclude-standard", "*.proto")
 	lsFiles.Dir = workspaceRoot
 	lsFiles.Stderr = os.Stderr
 	buf := &bytes.Buffer{}
@@ -301,37 +304,87 @@ func copyGeneratedProtos(workspaceRoot string) (*result, error) {
 		return nil, fmt.Errorf("failed to list proto sources: git ls-files failed")
 	}
 	for _, path := range strings.Split(buf.String(), "\n") {
-		if strings.HasSuffix(path, ".proto") {
-			protos = append(protos, filepath.Join(workspaceRoot, path))
-		}
+		protos = append(protos, filepath.Join(workspaceRoot, path))
 	}
 
 	result := &result{}
 
-	buildFiles := make(map[string]*parsedBuildFile)
+	eg := errgroup.Group{}
+	parser := newBuildFileParser()
 
 	for _, proto := range protos {
-		// For now only support build files named "BUILD".
-		buildFilePath := filepath.Join(filepath.Dir(proto), "BUILD")
-		buildFile := buildFiles[buildFilePath]
-		if buildFile == nil {
-			// Ignore protos that are not in bazel packages.
-			if _, err := os.Stat(buildFilePath); err != nil {
-				continue
-			}
-			buildFile, err = parseBuildFile(buildFilePath)
+		proto := proto
+		eg.Go(func() error {
+			// For now only support build files named "BUILD".
+			buildFilePath := filepath.Join(filepath.Dir(proto), "BUILD")
+			buildFile, err := parser.Parse(buildFilePath)
 			if err != nil {
-				return nil, fmt.Errorf("could not parse BUILD file %q: %v", buildFilePath, err)
+				// Ignore protos that aren't direct children of Bazel packages.
+				if os.IsNotExist(err) {
+					return nil
+				}
+				return fmt.Errorf("failed to parse BUILD file at %q: %v", buildFilePath, err)
 			}
-			buildFiles[buildFilePath] = buildFile
-		}
-
-		if err := syncProto(workspaceRoot, proto, buildFile, result); err != nil {
-			return nil, err
-		}
-
+			if err := syncProto(workspaceRoot, proto, buildFile, result); err != nil {
+				return err
+			}
+			return nil
+		})
+	}
+	if err := eg.Wait(); err != nil {
+		return nil, err
 	}
 	return result, nil
+}
+
+type Result[T any] struct {
+	Err error
+	Val T
+}
+
+// buildFileParser is a deduplicating, concurrency-safe BUILD file parser.
+type buildFileParser struct {
+	group singleflight.Group
+
+	mu    sync.RWMutex
+	cache map[string]*Result[*parsedBuildFile]
+}
+
+func newBuildFileParser() *buildFileParser {
+	return &buildFileParser{
+		cache: map[string]*Result[*parsedBuildFile]{},
+	}
+}
+
+func (p *buildFileParser) Parse(path string) (*parsedBuildFile, error) {
+	p.mu.RLock()
+	cached := p.cache[path]
+	p.mu.RUnlock()
+	if cached != nil {
+		return cached.Val, cached.Err
+	}
+
+	val, err, _ := p.group.Do(path, func() (val interface{}, err error) {
+		defer func() {
+			result := &Result[*parsedBuildFile]{}
+			if err != nil {
+				result.Err = err
+			} else {
+				result.Val = val.(*parsedBuildFile)
+			}
+
+			p.mu.Lock()
+			p.cache[path] = result
+			p.mu.Unlock()
+		}()
+
+		return parseBuildFile(path)
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return val.(*parsedBuildFile), nil
 }
 
 func fatalf(msg string, args ...any) {
