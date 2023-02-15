@@ -297,11 +297,16 @@ func copyGeneratedProtos(workspaceRoot string) (*result, error) {
 	var protos []string
 	lsFiles := exec.Command("git", "ls-files", "--exclude-standard", "*.proto")
 	lsFiles.Dir = workspaceRoot
-	lsFiles.Stderr = os.Stderr
+	stderr := &bytes.Buffer{}
+	lsFiles.Stderr = stderr
 	buf := &bytes.Buffer{}
 	lsFiles.Stdout = buf
 	if err := lsFiles.Run(); err != nil {
-		return nil, fmt.Errorf("failed to list proto sources: git ls-files failed")
+		// If we're not in a git repo, do nothing.
+		if _, err := os.Stat(filepath.Join(workspaceRoot, ".git")); os.IsNotExist(err) {
+			return &result{}, nil
+		}
+		return nil, fmt.Errorf("failed to list proto sources: git ls-files failed: %s", stderr.String())
 	}
 	for _, path := range strings.Split(buf.String(), "\n") {
 		protos = append(protos, filepath.Join(workspaceRoot, path))
