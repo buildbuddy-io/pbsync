@@ -295,7 +295,10 @@ func copyGeneratedProtos(workspaceRoot string) (*result, error) {
 
 	// Get proto source paths (use the git index for speed)
 	var protos []string
-	lsFiles := exec.Command("git", "ls-files", "--exclude-standard", "*.proto")
+	lsFiles := exec.Command("sh", "-c", `
+		git ls-files --exclude-standard '*.proto'
+		git ls-files --others --exclude-standard '*.proto'
+	`)
 	lsFiles.Dir = workspaceRoot
 	stderr := &bytes.Buffer{}
 	lsFiles.Stderr = stderr
