@@ -395,8 +395,12 @@ func (p *buildFileParser) Parse(path string) (*parsedBuildFile, error) {
 	return val.(*parsedBuildFile), nil
 }
 
+func printf(msg string, args ...any) {
+	fmt.Fprintf(os.Stderr, msg, args...)
+}
+
 func fatalf(msg string, args ...any) {
-	fmt.Printf("pbsync: "+msg+"\n", args...)
+	printf("pbsync: "+msg+"\n", args...)
 	os.Exit(1)
 }
 
@@ -425,10 +429,10 @@ func main() {
 		total.upToDate += result.upToDate
 	}
 	if total.created > 0 {
-		fmt.Printf("🔄 ")
+		printf("🔄 ")
 	} else {
-		fmt.Printf("\x1b[90m")
+		printf("\x1b[90m")
 	}
 
-	fmt.Printf("pbsync: updated: %d, up to date: %d, duration: %s\x1b[m\n", total.created, total.upToDate, time.Since(start))
+	printf("pbsync: updated: %d, up to date: %d, duration: %s\x1b[m\n", total.created, total.upToDate, time.Since(start))
 }
