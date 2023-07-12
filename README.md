@@ -8,7 +8,14 @@ definitions built with protobufjs).
 
 ## Usage
 
-Install it as a [bb](https://buildbuddy.io/cli/) plugin:
+Install it with `go`:
+
+```shell
+go install github.com/bduffany/pbsync@latest
+# Then run as `pbsync`
+```
+
+Or install it as a [bb](https://buildbuddy.io/cli/) plugin:
 
 ```shell
 bb install --user bduffany/pbsync
