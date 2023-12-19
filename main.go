@@ -116,7 +116,11 @@ type languageProtoRule struct {
 	kind, name, protoRuleName, importPath string
 }
 
-func (r *languageProtoRule) getSrcAndDest(workspaceRoot, bazelBin, protoPath string) (string, string, error) {
+type srcAndDest struct {
+	src, dest string
+}
+
+func (r *languageProtoRule) getSrcAndDest(workspaceRoot, bazelBin, protoPath string) ([]srcAndDest, error) {
 	protoRelpath := strings.TrimPrefix(protoPath, workspaceRoot)
 
 	switch r.kind {
@@ -124,21 +128,30 @@ func (r *languageProtoRule) getSrcAndDest(workspaceRoot, bazelBin, protoPath str
 	case goProtoLibrary:
 		wsRelpath := githubRepoRe.ReplaceAllLiteralString(r.importPath, "")
 		if wsRelpath == r.importPath {
-			return "", "", fmt.Errorf("could not figure out workspace relative path for import %q", r.importPath)
+			return nil, fmt.Errorf("could not figure out workspace relative path for import %q", r.importPath)
 		}
-		protoBase := filepath.Base(protoPath)
-		genBase := strings.TrimSuffix(protoBase, ".proto") + ".pb.go"
-		src := filepath.Join(bazelBin, filepath.Dir(protoRelpath), r.name+"_", r.importPath, genBase)
-		dest := filepath.Join(workspaceRoot, wsRelpath, genBase)
-		return src, dest, nil
+		srcDir := filepath.Join(bazelBin, filepath.Dir(protoRelpath), r.name+"_", r.importPath)
+		srcs, err := filepath.Glob(srcDir + "/*.pb.go")
+		if err != nil {
+			return nil, fmt.Errorf("could not find generated go files: %s", err)
+		}
+
+		res := []srcAndDest{}
+		for _, src := range srcs {
+			genBase := filepath.Base(src)
+			dest := filepath.Join(workspaceRoot, wsRelpath, genBase)
+			res = append(res, srcAndDest{src: src, dest: dest})
+		}
+
+		return res, nil
 
 	case tsProtoLibrary:
 		src := filepath.Join(bazelBin, filepath.Dir(protoRelpath), r.name+".d.ts")
 		dest := filepath.Join(workspaceRoot, filepath.Dir(protoRelpath), r.name+".d.ts")
-		return src, dest, nil
+		return []srcAndDest{{src: src, dest: dest}}, nil
 
 	}
-	return "", "", fmt.Errorf("unknown proto rule kind %q", r.kind)
+	return nil, fmt.Errorf("unknown proto rule kind %q", r.kind)
 }
 
 type parsedBuildFile struct {
@@ -245,44 +258,50 @@ func syncProto(workspaceRoot string, protoFile string, buildFile *parsedBuildFil
 	}
 
 	for _, rule := range rules {
-		src, dest, err := rule.getSrcAndDest(workspaceRoot, bazelBin, protoFile)
-		if err != nil {
-			return err
-		}
+		srcAndDestPaths, err := rule.getSrcAndDest(workspaceRoot, bazelBin, protoFile)
 
-		// Read the generated source
-		sb, err := os.ReadFile(src)
-		if err != nil {
-			if os.IsNotExist(err) {
-				// Skip; the generated source is not available.
+		for _, srcAndDest := range srcAndDestPaths {
+			src := srcAndDest.src
+			dest := srcAndDest.dest
+
+			if err != nil {
+				return err
+			}
+
+			// Read the generated source
+			sb, err := os.ReadFile(src)
+			if err != nil {
+				if os.IsNotExist(err) {
+					// Skip; the generated source is not available.
+					continue
+				}
+				return err
+			}
+			sourceContent := string(sb)
+			if sourceContent == "" {
+				return fmt.Errorf("file is unexpectedly empty: %s", protoFile)
+			}
+
+			// Read the existing target file
+			db, err := os.ReadFile(dest)
+			if err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			destContent := string(db)
+
+			if sourceContent == destContent {
+				atomic.AddInt64(&result.upToDate, 1)
 				continue
 			}
-			return err
-		}
-		sourceContent := string(sb)
-		if sourceContent == "" {
-			return fmt.Errorf("file is unexpectedly empty: %s", protoFile)
-		}
 
-		// Read the existing target file
-		db, err := os.ReadFile(dest)
-		if err != nil && !os.IsNotExist(err) {
-			return err
+			if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(dest, sb, 0644); err != nil {
+				return err
+			}
+			atomic.AddInt64(&result.created, 1)
 		}
-		destContent := string(db)
-
-		if sourceContent == destContent {
-			atomic.AddInt64(&result.upToDate, 1)
-			continue
-		}
-
-		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(dest, sb, 0644); err != nil {
-			return err
-		}
-		atomic.AddInt64(&result.created, 1)
 	}
 	return nil
 }
