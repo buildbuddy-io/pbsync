@@ -11,14 +11,14 @@ definitions built with protobufjs).
 Install it with `go`:
 
 ```shell
-go install github.com/bduffany/pbsync@latest
+go install github.com/buildbuddy-io/pbsync@latest
 # Then run as `pbsync`
 ```
 
 Or install it as a [bb](https://buildbuddy.io/cli/) plugin:
 
 ```shell
-bb install --user bduffany/pbsync
+bb install --user buildbuddy-io/pbsync
 ```
 
 You can get a nice development workflow by combining this plugin with the
