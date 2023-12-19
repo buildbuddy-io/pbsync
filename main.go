@@ -128,12 +128,12 @@ func (r *languageProtoRule) getSrcAndDest(workspaceRoot, bazelBin, protoPath str
 	case goProtoLibrary:
 		wsRelpath := githubRepoRe.ReplaceAllLiteralString(r.importPath, "")
 		if wsRelpath == r.importPath {
-			return []srcAndDest{}, fmt.Errorf("could not figure out workspace relative path for import %q", r.importPath)
+			return nil, fmt.Errorf("could not figure out workspace relative path for import %q", r.importPath)
 		}
 		srcDir := filepath.Join(bazelBin, filepath.Dir(protoRelpath), r.name+"_", r.importPath)
 		srcs, err := filepath.Glob(srcDir + "/*.pb.go")
 		if err != nil {
-			return []srcAndDest{}, nil
+			return nil, fmt.Errorf("could not find generated go files: %s", err)
 		}
 
 		res := []srcAndDest{}
@@ -151,7 +151,7 @@ func (r *languageProtoRule) getSrcAndDest(workspaceRoot, bazelBin, protoPath str
 		return []srcAndDest{{src: src, dest: dest}}, nil
 
 	}
-	return []srcAndDest{}, fmt.Errorf("unknown proto rule kind %q", r.kind)
+	return nil, fmt.Errorf("unknown proto rule kind %q", r.kind)
 }
 
 type parsedBuildFile struct {
