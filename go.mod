@@ -1,4 +1,4 @@
-module github.com/bduffany/pbsync
+module github.com/buildbuddy-io/pbsync
 
 go 1.19
 
