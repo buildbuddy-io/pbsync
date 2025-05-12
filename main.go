@@ -307,9 +307,15 @@ func syncProto(workspaceRoot string, protoFile string, buildFile *parsedBuildFil
 }
 
 func copyGeneratedProtos(workspaceRoot string) (*result, error) {
-	_, err := os.Stat(filepath.Join(workspaceRoot, "WORKSPACE"))
-	if err != nil {
-		return nil, fmt.Errorf("%q does not appear to be a Bazel workspace (no WORKSPACE file): %s", workspaceRoot, err)
+	foundWorkspaceFile := false
+	for _, filename := range []string{"WORKSPACE", "WORKSPACE.bazel", "MODULE.bazel"} {
+		if _, err := os.Stat(filepath.Join(workspaceRoot, filename)); err == nil {
+			foundWorkspaceFile = true
+			break
+		}
+	}
+	if !foundWorkspaceFile {
+		return nil, fmt.Errorf("%q does not appear to be a Bazel workspace", workspaceRoot)
 	}
 
 	// Get proto source paths (use the git index for speed)
