@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"flag"
 	"fmt"
 	"os"
@@ -19,96 +18,41 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+var (
+	debug = os.Getenv("PBSYNC_DEBUG") == "1"
+)
+
 const (
 	goProtoLibrary = "go_proto_library"
 	tsProtoLibrary = "ts_proto_library"
-
-	bazelBinKey = "bazel-bin"
 )
 
 var (
 	githubRepoRe = regexp.MustCompile(`^github.com/(.+?)/(.+?)/`)
 )
 
+func debugf(format string, args ...any) {
+	if debug {
+		fmt.Fprintf(os.Stderr, "\x1b[33mDEBUG:\x1b[m "+format+"\n", args...)
+	}
+}
+
 func getBazelBinDir(workspaceRoot string) (string, error) {
-	// The `bazel info` command is unfortunately super slow (lame).
-	// So we cache it.
-	cached, err := cacheGet(cacheKey(bazelBinKey, workspaceRoot))
-	if err != nil {
-		return "", err
+	// If the bazel-bin symlink exists, trust it.
+	symlink := filepath.Join(workspaceRoot, "bazel-bin")
+	target, err := os.Readlink(symlink)
+	if err == nil {
+		return target, nil
 	}
-	if cached != "" {
-		return cached, nil
-	}
-	value, err := computeBazelBinDir(workspaceRoot)
-	if err != nil {
-		return "", err
-	}
-	if err := cacheSet(cacheKey(bazelBinKey, workspaceRoot), value); err != nil {
-		return "", err
-	}
-	return value, nil
-}
 
-func cacheKey(keys ...string) string {
-	var b []byte
-	for _, k := range keys {
-		bk := sha256.Sum256([]byte(k))
-		b = append(b, bk[:]...)
-	}
-	return fmt.Sprintf("%x", b)
-}
-
-func cachePath(key string) (string, error) {
-	userDir, err := os.UserCacheDir()
+	// Fall back to bazel info (takes ~50ms if bazel is running)
+	cmd := exec.Command("bazel", "info", "bazel-bin")
+	cmd.Dir = workspaceRoot
+	b, err := cmd.Output()
 	if err != nil {
 		return "", err
-	}
-	sha := fmt.Sprintf("%x", sha256.Sum256([]byte(key)))
-	return filepath.Join(userDir, "pbsync", sha), nil
-}
-
-func cacheGet(key string) (value string, err error) {
-	path, err := cachePath(key)
-	if err != nil {
-		return "", err
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
 	}
 	return string(b), nil
-}
-
-func cacheSet(key, value string) error {
-	path, err := cachePath(key)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte(value), 0644)
-}
-
-func computeBazelBinDir(workspaceRoot string) (string, error) {
-	cmd := exec.Command("bazel", "info", "--show_make_env")
-	cmd.Dir = workspaceRoot
-	b, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", err
-	}
-	lines := strings.Split(string(b), "\n")
-	for _, line := range lines {
-		fields := strings.Fields(line)
-		if len(fields) != 2 || fields[0] != "bazel-bin:" {
-			continue
-		}
-		return fields[1], nil
-	}
-	return "", fmt.Errorf("missing 'bazel-bin' entry in `bazel info --show_make_env`")
 }
 
 type languageProtoRule struct {
@@ -122,14 +66,16 @@ type srcAndDest struct {
 func (r *languageProtoRule) getSrcAndDest(workspaceRoot, bazelBin, protoPath string) ([]srcAndDest, error) {
 	protoRelpath := strings.TrimPrefix(protoPath, workspaceRoot)
 
-	switch r.kind {
+	debugf("getSrcAndDest(%q, %q, %q)", workspaceRoot, bazelBin, protoPath)
 
+	switch r.kind {
 	case goProtoLibrary:
 		wsRelpath := githubRepoRe.ReplaceAllLiteralString(r.importPath, "")
 		if wsRelpath == r.importPath {
 			return nil, fmt.Errorf("could not figure out workspace relative path for import %q", r.importPath)
 		}
 		srcDir := filepath.Join(bazelBin, filepath.Dir(protoRelpath), r.name+"_", r.importPath)
+		debugf("globbing: %q", srcDir+"/*.pb.go")
 		srcs, err := filepath.Glob(srcDir + "/*.pb.go")
 		if err != nil {
 			return nil, fmt.Errorf("could not find generated go files: %s", err)
@@ -143,7 +89,6 @@ func (r *languageProtoRule) getSrcAndDest(workspaceRoot, bazelBin, protoPath str
 		}
 
 		return res, nil
-
 	case tsProtoLibrary:
 		src := filepath.Join(bazelBin, filepath.Dir(protoRelpath), r.name+".d.ts")
 		dest := filepath.Join(workspaceRoot, filepath.Dir(protoRelpath), r.name+".d.ts")
@@ -245,11 +190,14 @@ type result struct {
 }
 
 func syncProto(workspaceRoot string, protoFile string, buildFile *parsedBuildFile, result *result) error {
+	debugf("> SYNC %q", protoFile)
+
 	rules, ok := buildFile.getLangProtoRulesForProto(protoFile)
 	if !ok {
 		fmt.Printf("could not figure out proto rule for %q\n", protoFile)
 		return nil
 	}
+	debugf("rules(%q) => %+#v", protoFile, rules)
 
 	bazelBin, err := getBazelBinDir(workspaceRoot)
 	if err != nil {
@@ -257,15 +205,16 @@ func syncProto(workspaceRoot string, protoFile string, buildFile *parsedBuildFil
 	}
 
 	for _, rule := range rules {
+		debugf("Visiting rule %q", rule.name)
 		srcAndDestPaths, err := rule.getSrcAndDest(workspaceRoot, bazelBin, protoFile)
+		if err != nil {
+			return fmt.Errorf("failed to get src and dest paths for %q: %s", protoFile, err)
+		}
 
 		for _, srcAndDest := range srcAndDestPaths {
+			debugf("src %q", srcAndDest.src)
 			src := srcAndDest.src
 			dest := srcAndDest.dest
-
-			if err != nil {
-				return err
-			}
 
 			// Read the generated source
 			sb, err := os.ReadFile(src)
@@ -290,6 +239,7 @@ func syncProto(workspaceRoot string, protoFile string, buildFile *parsedBuildFil
 
 			if sourceContent == destContent {
 				atomic.AddInt64(&result.upToDate, 1)
+				debugf("dst %q is up to date", dest)
 				continue
 			}
 
@@ -342,10 +292,13 @@ func copyGeneratedProtos(workspaceRoot string) (*result, error) {
 	result := &result{}
 
 	eg := errgroup.Group{}
+	if debug {
+		// Concurrency makes debug logs harder to read - disable.
+		eg.SetLimit(1)
+	}
 	parser := newBuildFileParser()
 
 	for _, proto := range protos {
-		proto := proto
 		eg.Go(func() error {
 			// For now only support build files named "BUILD".
 			buildFilePath := filepath.Join(filepath.Dir(proto), "BUILD")
