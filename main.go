@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -173,7 +172,7 @@ func (b *parsedBuildFile) getLangProtoRulesForProto(protoFile string) ([]languag
 }
 
 func parseBuildFile(buildFilePath string) (*parsedBuildFile, error) {
-	buildFileContents, err := ioutil.ReadFile(buildFilePath)
+	buildFileContents, err := os.ReadFile(buildFilePath)
 	if err != nil {
 		return nil, err
 	}
